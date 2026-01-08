@@ -119,6 +119,23 @@ class DataFetcher:
                 return False
         return True
 
+    def _save_debug(self, driver, label: str):
+        try:
+            debug_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'assets', 'debug'))
+            os.makedirs(debug_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            html_path = os.path.join(debug_dir, f"{label}_{ts}.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            png_path = os.path.join(debug_dir, f"{label}_{ts}.png")
+            try:
+                driver.save_screenshot(png_path)
+            except Exception:
+                pass
+            logging.error(f"Saved debug files: {html_path}, {png_path}")
+        except Exception:
+            logging.exception("Failed to save debug files")
+
     # @staticmethod
     def _refresh_captcha(self, driver):# 刷新验证码
         # get refresh button
@@ -484,9 +501,13 @@ class DataFetcher:
                 userid_list.append(re.findall("[0-9]+", element.text)[-1])
             return userid_list
         except Exception as e:
-            logging.error(
-                f"Webdriver quit abnormly, reason: {e}. get user_id list failed.")
+            logging.exception(f"Webdriver quit abnormly, reason: {e}. get user_id list failed.")
+            try:
+                self._save_debug(driver, 'get_user_ids')
+            except Exception:
+                logging.exception("Failed saving debug in _get_user_ids")
             driver.quit()
+            return []
 
     def _get_electric_balance(self, driver):
         try:
@@ -549,8 +570,12 @@ class DataFetcher:
             last_daily_date = date_element.text # 获取最近一次用电量的日期
             return last_daily_date, float(usage_element.text)
         except Exception as e:
-            logging.error(f"The yesterday data get failed : {e}")
-            return None
+            logging.exception(f"The yesterday data get failed : {e}")
+            try:
+                self._save_debug(driver, 'yesterday_usage')
+            except Exception:
+                logging.exception("Failed saving debug in _get_yesterday_usage")
+            return None, None
 
     def _get_month_usage(self, driver):
         """获取每月用电量"""
@@ -581,8 +606,12 @@ class DataFetcher:
                 charge.append(month_element[i][2])
             return month, usage, charge
         except Exception as e:
-            logging.error(f"The month data get failed : {e}")
-            return None,None,None
+            logging.exception(f"The month data get failed : {e}")
+            try:
+                self._save_debug(driver, 'month_usage')
+            except Exception:
+                logging.exception("Failed saving debug in _get_month_usage")
+            return [], [], []
 
     # 增加获取每日用电量的函数
     def _get_daily_usage_data(self, driver):
@@ -602,26 +631,34 @@ class DataFetcher:
 
         time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
 
-        # 等待用电量的数据出现
-        usage_element = driver.find_element(By.XPATH,
-                                            "//div[@class='el-tab-pane dayd']//div[@class='el-table__body-wrapper is-scrolling-none']/table/tbody/tr[1]/td[2]/div")
-        WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(usage_element))
+        try:
+            # 等待用电量的数据出现
+            usage_element = driver.find_element(By.XPATH,
+                                                "//div[@class='el-tab-pane dayd']//div[@class='el-table__body-wrapper is-scrolling-none']/table/tbody/tr[1]/td[2]/div")
+            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(usage_element))
 
-        # 获取用电量的数据
-        days_element = driver.find_elements(By.XPATH,
-                                            "//*[@id='pane-second']/div[2]/div[2]/div[1]/div[3]/table/tbody/tr")  # 用电量值列表
-        date = []
-        usages = []
-        # 将用电量保存为字典
-        for i in days_element:
-            day = i.find_element(By.XPATH, "td[1]/div").text
-            usage = i.find_element(By.XPATH, "td[2]/div").text
-            if usage != "":
-                usages.append(usage)
-                date.append(day)
-            else:
-                logging.info(f"The electricity consumption of {usage} get nothing")
-        return date, usages
+            # 获取用电量的数据
+            days_element = driver.find_elements(By.XPATH,
+                                                "//*[@id='pane-second']/div[2]/div[2]/div[1]/div[3]/table/tbody/tr")  # 用电量值列表
+            date = []
+            usages = []
+            # 将用电量保存为字典
+            for i in days_element:
+                day = i.find_element(By.XPATH, "td[1]/div").text
+                usage = i.find_element(By.XPATH, "td[2]/div").text
+                if usage != "":
+                    usages.append(usage)
+                    date.append(day)
+                else:
+                    logging.info(f"The electricity consumption of {usage} get nothing")
+            return date, usages
+        except Exception as e:
+            logging.exception(f"The daily data get failed : {e}")
+            try:
+                self._save_debug(driver, 'daily_usage')
+            except Exception:
+                logging.exception("Failed saving debug in _get_daily_usage_data")
+            return [], []
 
     def _save_user_data(self, user_id, balance, last_daily_date, last_daily_usage, date, usages, month, month_usage, month_charge, yearly_charge, yearly_usage):
         # 连接数据库集合
