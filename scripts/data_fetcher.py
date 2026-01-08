@@ -119,6 +119,13 @@ class DataFetcher:
                 return False
         return True
 
+    # @staticmethod
+    def _refresh_captcha(self, driver):# 刷新验证码
+        # get refresh button
+        refresh_button = driver.find_element(By.CLASS_NAME, "slide-verify-refresh-icon")
+        ActionChains(driver).click(refresh_button).perform()
+        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+
     # @staticmethod 
     def _sliding_track(self, driver, distance):# 机器模拟人工滑动轨迹
         # 获取按钮
@@ -252,22 +259,40 @@ class DataFetcher:
             logging.info("Click login button.\r")
             # sometimes ddddOCR may fail, so add retry logic)
             for retry_times in range(1, self.RETRY_TIMES_LIMIT + 1):
-                
-                self._click_button(driver, By.XPATH, '//*[@id="login_box"]/div[1]/div[1]/div[2]/span')
-                #get canvas image
-                background_JS = 'return document.getElementById("slideVerify").childNodes[0].toDataURL("image/png");'
-                # targe_JS = 'return document.getElementsByClassName("slide-verify-block")[0].toDataURL("image/png");'
-                # get base64 image data
-                im_info = driver.execute_script(background_JS) 
-                background = im_info.split(',')[1]  
-                background_image = base64_to_PLI(background)
-                logging.info(f"Get electricity canvas image successfully.\r")
-                distance = self.onnx.get_distance(background_image)
+                distance = -1
+                while distance == -1: # 获取验证码距离失败时，刷新验证码重新获取
+                    self._click_button(driver, By.XPATH, '//*[@id="login_box"]/div[1]/div[1]/div[2]/span')
+                    #get canvas image
+                    background_JS = 'return document.getElementById("slideVerify").childNodes[0].toDataURL("image/png");'
+                    # targe_JS = 'return document.getElementsByClassName("slide-verify-block")[0].toDataURL("image/png");'
+                    # get base64 image data
+                    im_info = driver.execute_script(background_JS) 
+                    background = im_info.split(',')[1]  
+                    background_image = base64_to_PLI(background)
+                    logging.info(f"Get electricity canvas image successfully.\r")
+                    distance = self.onnx.get_distance(background_image)
+                    if distance == -1:
+                        logging.info(f"Get electricity canvas image distance failed, try to refresh the captcha and get again.\r")
+                        self._refresh_captcha(driver)
                 logging.info(f"Image CaptCHA distance is {distance}.\r")
 
                 self._sliding_track(driver, round(distance*1.06)) #1.06是补偿
                 time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
                 if (driver.current_url == LOGIN_URL): # if login not success
+                    # 账号风控，不再尝试
+                    try:
+                        errmsgs = driver.find_elements(By.CSS_SELECTOR, "div.errmsg-tip span")
+                        if errmsgs:
+                            errmsg = errmsgs[0].text
+                            if "登录操作异常" in errmsg:
+                                logging.info(f"Login failed, account may be locked.\r")
+                                return False
+                            if "未知" in errmsg:
+                                logging.info(f"Login failed, too many attempts.\r")
+                                return False
+                    except:
+                        pass
+                    # 未触发风控，继续尝试
                     try:
                         logging.info(f"Sliding CAPTCHA recognition failed and reloaded.\r")
                         self._click_button(driver, By.CLASS_NAME, "el-button.el-button--primary")
