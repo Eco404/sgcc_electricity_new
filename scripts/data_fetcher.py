@@ -523,19 +523,50 @@ class DataFetcher:
     def _get_yearly_data(self, driver):
 
         try:
-            if datetime.now().month == 1:
-                self._click_button(driver, By.XPATH, '//*[@id="pane-first"]/div[1]/div/div[1]/div/div/input')
-                time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-                span_element = driver.find_element(By.XPATH, f"//span[contains(text(), '{datetime.now().year - 1}')]")
-                span_element.click()
-                time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+            # 点击年数据 tab
             self._click_button(driver, By.XPATH, "//div[@class='el-tabs__nav is-top']/div[@id='tab-first']")
             time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-            # wait for data displayed
-            target = driver.find_element(By.CLASS_NAME, "total")
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
+            # 尝试等待 .total 出现；如果当前年份无数据则选择上一年后重试
+            try:
+                target = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "total")))
+                WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
+            except Exception:
+                logging.info("Current year yearly data not present, try selecting previous year")
+                # 打开年份选择并选择上一年
+                try:
+                    # 更稳健地打开年份下拉并选中 prev_year
+                    try:
+                        # 点击整个 el-select 容器（比只点击 input 更可靠）
+                        self._click_button(driver, By.XPATH, "//*[@id='pane-first']//div[contains(@class,'el-select')]")
+                    except Exception:
+                        # 退而求其次，点击 caret 图标
+                        try:
+                            self._click_button(driver, By.XPATH, "//*[@id='pane-first']//i[contains(@class,'el-select__caret')]")
+                        except Exception:
+                            logging.exception("Failed to click year select trigger")
+                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                    prev_year = datetime.now().year - 1
+                    # 等待下拉菜单渲染出来（el-select-dropdown.el-popper）并点击对应项
+                    dropdown_xpath = "//div[contains(@class,'el-select-dropdown') and contains(@class,'el-popper')]"
+                    try:
+                        WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                            EC.presence_of_element_located((By.XPATH, dropdown_xpath)))
+                        opt_xpath = dropdown_xpath + f"//li[contains(@class,'el-select-dropdown__item')]//span[normalize-space(text())='{prev_year}']"
+                        opt = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                            EC.element_to_be_clickable((By.XPATH, opt_xpath)))
+                        opt.click()
+                    except Exception:
+                        logging.exception("Failed to find/click previous year option in dropdown")
+                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                    target = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, "total")))
+                    WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
+                except Exception as e:
+                    logging.exception(f"Failed to select previous year for yearly data: {e}")
+                    return None, None
         except Exception as e:
-            logging.error(f"The yearly data get failed : {e}")
+            logging.exception(f"The yearly data get failed : {e}")
             return None, None
 
         # get data
@@ -583,16 +614,44 @@ class DataFetcher:
         try:
             self._click_button(driver, By.XPATH, "//div[@class='el-tabs__nav is-top']/div[@id='tab-first']")
             time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-            if datetime.now().month == 1:
-                self._click_button(driver, By.XPATH, '//*[@id="pane-first"]/div[1]/div/div[1]/div/div/input')
-                time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-                span_element = driver.find_element(By.XPATH, f"//span[contains(text(), '{datetime.now().year - 1}')]")
-                span_element.click()
-                time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-            # wait for month displayed
-            target = driver.find_element(By.CLASS_NAME, "total")
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
-            month_element = driver.find_element(By.XPATH, "//*[@id='pane-first']/div[1]/div[2]/div[2]/div/div[3]/table/tbody").text
+            # 尝试等待 .total/表格出现；若当前年无数据则选择上一年再试
+            try:
+                target = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "total")))
+                WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
+            except Exception:
+                logging.info("Current year monthly data not present, try selecting previous year")
+                try:
+                    # 更稳健地打开年份下拉并选中 prev_year
+                    try:
+                        self._click_button(driver, By.XPATH, "//*[@id='pane-first']//div[contains(@class,'el-select')]")
+                    except Exception:
+                        try:
+                            self._click_button(driver, By.XPATH, "//*[@id='pane-first']//i[contains(@class,'el-select__caret')]")
+                        except Exception:
+                            logging.exception("Failed to click year select trigger")
+                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                    prev_year = datetime.now().year - 1
+                    dropdown_xpath = "//div[contains(@class,'el-select-dropdown') and contains(@class,'el-popper')]"
+                    try:
+                        WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                            EC.presence_of_element_located((By.XPATH, dropdown_xpath)))
+                        opt_xpath = dropdown_xpath + f"//li[contains(@class,'el-select-dropdown__item')]//span[normalize-space(text())='{prev_year}']"
+                        opt = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                            EC.element_to_be_clickable((By.XPATH, opt_xpath)))
+                        opt.click()
+                    except Exception:
+                        logging.exception("Failed to find/click previous year option in dropdown")
+                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                    target = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, "total")))
+                    WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
+                except Exception as e:
+                    logging.exception(f"Failed to select previous year for month usage: {e}")
+                    return [], [], []
+            month_tbody = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                EC.presence_of_element_located((By.XPATH, "//*[@id='pane-first']/div[1]/div[2]/div[2]/div/div[3]/table/tbody")))
+            month_element = month_tbody.text
             month_element = month_element.split("\n")
             month_element.remove("MAX")
             month_element = np.array(month_element).reshape(-1, 3)
