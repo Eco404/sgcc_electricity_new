@@ -218,7 +218,7 @@ class ONNX:
         boxes = self.get_boxes(prediction=prediction)
         if len(boxes) == 0:
             print('No gaps were detected.')
-            return 0
+            return -1
         else:
             if draw:
                 org_img = self.draw(org_img, boxes)

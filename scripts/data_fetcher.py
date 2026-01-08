@@ -119,6 +119,30 @@ class DataFetcher:
                 return False
         return True
 
+    def _save_debug(self, driver, label: str):
+        try:
+            debug_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'assets', 'debug'))
+            os.makedirs(debug_dir, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            html_path = os.path.join(debug_dir, f"{label}_{ts}.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+            png_path = os.path.join(debug_dir, f"{label}_{ts}.png")
+            try:
+                driver.save_screenshot(png_path)
+            except Exception:
+                pass
+            logging.error(f"Saved debug files: {html_path}, {png_path}")
+        except Exception:
+            logging.exception("Failed to save debug files")
+
+    # @staticmethod
+    def _refresh_captcha(self, driver):# 刷新验证码
+        # get refresh button
+        refresh_button = driver.find_element(By.CLASS_NAME, "slide-verify-refresh-icon")
+        ActionChains(driver).click(refresh_button).perform()
+        time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+
     # @staticmethod 
     def _sliding_track(self, driver, distance):# 机器模拟人工滑动轨迹
         # 获取按钮
@@ -252,22 +276,40 @@ class DataFetcher:
             logging.info("Click login button.\r")
             # sometimes ddddOCR may fail, so add retry logic)
             for retry_times in range(1, self.RETRY_TIMES_LIMIT + 1):
-                
-                self._click_button(driver, By.XPATH, '//*[@id="login_box"]/div[1]/div[1]/div[2]/span')
-                #get canvas image
-                background_JS = 'return document.getElementById("slideVerify").childNodes[0].toDataURL("image/png");'
-                # targe_JS = 'return document.getElementsByClassName("slide-verify-block")[0].toDataURL("image/png");'
-                # get base64 image data
-                im_info = driver.execute_script(background_JS) 
-                background = im_info.split(',')[1]  
-                background_image = base64_to_PLI(background)
-                logging.info(f"Get electricity canvas image successfully.\r")
-                distance = self.onnx.get_distance(background_image)
+                distance = -1
+                while distance == -1: # 获取验证码距离失败时，刷新验证码重新获取
+                    self._click_button(driver, By.XPATH, '//*[@id="login_box"]/div[1]/div[1]/div[2]/span')
+                    #get canvas image
+                    background_JS = 'return document.getElementById("slideVerify").childNodes[0].toDataURL("image/png");'
+                    # targe_JS = 'return document.getElementsByClassName("slide-verify-block")[0].toDataURL("image/png");'
+                    # get base64 image data
+                    im_info = driver.execute_script(background_JS) 
+                    background = im_info.split(',')[1]  
+                    background_image = base64_to_PLI(background)
+                    logging.info(f"Get electricity canvas image successfully.\r")
+                    distance = self.onnx.get_distance(background_image)
+                    if distance == -1:
+                        logging.info(f"Get electricity canvas image distance failed, try to refresh the captcha and get again.\r")
+                        self._refresh_captcha(driver)
                 logging.info(f"Image CaptCHA distance is {distance}.\r")
 
                 self._sliding_track(driver, round(distance*1.06)) #1.06是补偿
                 time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
                 if (driver.current_url == LOGIN_URL): # if login not success
+                    # 账号风控，不再尝试
+                    try:
+                        errmsgs = driver.find_elements(By.CSS_SELECTOR, "div.errmsg-tip span")
+                        if errmsgs:
+                            errmsg = errmsgs[0].text
+                            if "登录操作异常" in errmsg:
+                                logging.info(f"Login failed, account may be locked.\r")
+                                return False
+                            if "未知" in errmsg:
+                                logging.info(f"Login failed, too many attempts.\r")
+                                return False
+                    except:
+                        pass
+                    # 未触发风控，继续尝试
                     try:
                         logging.info(f"Sliding CAPTCHA recognition failed and reloaded.\r")
                         self._click_button(driver, By.CLASS_NAME, "el-button.el-button--primary")
@@ -459,9 +501,13 @@ class DataFetcher:
                 userid_list.append(re.findall("[0-9]+", element.text)[-1])
             return userid_list
         except Exception as e:
-            logging.error(
-                f"Webdriver quit abnormly, reason: {e}. get user_id list failed.")
+            logging.exception(f"Webdriver quit abnormly, reason: {e}. get user_id list failed.")
+            try:
+                self._save_debug(driver, 'get_user_ids')
+            except Exception:
+                logging.exception("Failed saving debug in _get_user_ids")
             driver.quit()
+            return []
 
     def _get_electric_balance(self, driver):
         try:
@@ -477,19 +523,50 @@ class DataFetcher:
     def _get_yearly_data(self, driver):
 
         try:
-            if datetime.now().month == 1:
-                self._click_button(driver, By.XPATH, '//*[@id="pane-first"]/div[1]/div/div[1]/div/div/input')
-                time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-                span_element = driver.find_element(By.XPATH, f"//span[contains(text(), '{datetime.now().year - 1}')]")
-                span_element.click()
-                time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+            # 点击年数据 tab
             self._click_button(driver, By.XPATH, "//div[@class='el-tabs__nav is-top']/div[@id='tab-first']")
             time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-            # wait for data displayed
-            target = driver.find_element(By.CLASS_NAME, "total")
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
+            # 尝试等待 .total 出现；如果当前年份无数据则选择上一年后重试
+            try:
+                target = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "total")))
+                WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
+            except Exception:
+                logging.info("Current year yearly data not present, try selecting previous year")
+                # 打开年份选择并选择上一年
+                try:
+                    # 更稳健地打开年份下拉并选中 prev_year
+                    try:
+                        # 点击整个 el-select 容器（比只点击 input 更可靠）
+                        self._click_button(driver, By.XPATH, "//*[@id='pane-first']//div[contains(@class,'el-select')]")
+                    except Exception:
+                        # 退而求其次，点击 caret 图标
+                        try:
+                            self._click_button(driver, By.XPATH, "//*[@id='pane-first']//i[contains(@class,'el-select__caret')]")
+                        except Exception:
+                            logging.exception("Failed to click year select trigger")
+                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                    prev_year = datetime.now().year - 1
+                    # 等待下拉菜单渲染出来（el-select-dropdown.el-popper）并点击对应项
+                    dropdown_xpath = "//div[contains(@class,'el-select-dropdown') and contains(@class,'el-popper')]"
+                    try:
+                        WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                            EC.presence_of_element_located((By.XPATH, dropdown_xpath)))
+                        opt_xpath = dropdown_xpath + f"//li[contains(@class,'el-select-dropdown__item')]//span[normalize-space(text())='{prev_year}']"
+                        opt = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                            EC.element_to_be_clickable((By.XPATH, opt_xpath)))
+                        opt.click()
+                    except Exception:
+                        logging.exception("Failed to find/click previous year option in dropdown")
+                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                    target = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, "total")))
+                    WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
+                except Exception as e:
+                    logging.exception(f"Failed to select previous year for yearly data: {e}")
+                    return None, None
         except Exception as e:
-            logging.error(f"The yearly data get failed : {e}")
+            logging.exception(f"The yearly data get failed : {e}")
             return None, None
 
         # get data
@@ -524,8 +601,12 @@ class DataFetcher:
             last_daily_date = date_element.text # 获取最近一次用电量的日期
             return last_daily_date, float(usage_element.text)
         except Exception as e:
-            logging.error(f"The yesterday data get failed : {e}")
-            return None
+            logging.exception(f"The yesterday data get failed : {e}")
+            try:
+                self._save_debug(driver, 'yesterday_usage')
+            except Exception:
+                logging.exception("Failed saving debug in _get_yesterday_usage")
+            return None, None
 
     def _get_month_usage(self, driver):
         """获取每月用电量"""
@@ -533,16 +614,44 @@ class DataFetcher:
         try:
             self._click_button(driver, By.XPATH, "//div[@class='el-tabs__nav is-top']/div[@id='tab-first']")
             time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-            if datetime.now().month == 1:
-                self._click_button(driver, By.XPATH, '//*[@id="pane-first"]/div[1]/div/div[1]/div/div/input')
-                time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-                span_element = driver.find_element(By.XPATH, f"//span[contains(text(), '{datetime.now().year - 1}')]")
-                span_element.click()
-                time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
-            # wait for month displayed
-            target = driver.find_element(By.CLASS_NAME, "total")
-            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
-            month_element = driver.find_element(By.XPATH, "//*[@id='pane-first']/div[1]/div[2]/div[2]/div/div[3]/table/tbody").text
+            # 尝试等待 .total/表格出现；若当前年无数据则选择上一年再试
+            try:
+                target = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "total")))
+                WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
+            except Exception:
+                logging.info("Current year monthly data not present, try selecting previous year")
+                try:
+                    # 更稳健地打开年份下拉并选中 prev_year
+                    try:
+                        self._click_button(driver, By.XPATH, "//*[@id='pane-first']//div[contains(@class,'el-select')]")
+                    except Exception:
+                        try:
+                            self._click_button(driver, By.XPATH, "//*[@id='pane-first']//i[contains(@class,'el-select__caret')]")
+                        except Exception:
+                            logging.exception("Failed to click year select trigger")
+                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                    prev_year = datetime.now().year - 1
+                    dropdown_xpath = "//div[contains(@class,'el-select-dropdown') and contains(@class,'el-popper')]"
+                    try:
+                        WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                            EC.presence_of_element_located((By.XPATH, dropdown_xpath)))
+                        opt_xpath = dropdown_xpath + f"//li[contains(@class,'el-select-dropdown__item')]//span[normalize-space(text())='{prev_year}']"
+                        opt = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                            EC.element_to_be_clickable((By.XPATH, opt_xpath)))
+                        opt.click()
+                    except Exception:
+                        logging.exception("Failed to find/click previous year option in dropdown")
+                    time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
+                    target = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, "total")))
+                    WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(target))
+                except Exception as e:
+                    logging.exception(f"Failed to select previous year for month usage: {e}")
+                    return [], [], []
+            month_tbody = WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(
+                EC.presence_of_element_located((By.XPATH, "//*[@id='pane-first']/div[1]/div[2]/div[2]/div/div[3]/table/tbody")))
+            month_element = month_tbody.text
             month_element = month_element.split("\n")
             month_element.remove("MAX")
             month_element = np.array(month_element).reshape(-1, 3)
@@ -556,8 +665,12 @@ class DataFetcher:
                 charge.append(month_element[i][2])
             return month, usage, charge
         except Exception as e:
-            logging.error(f"The month data get failed : {e}")
-            return None,None,None
+            logging.exception(f"The month data get failed : {e}")
+            try:
+                self._save_debug(driver, 'month_usage')
+            except Exception:
+                logging.exception("Failed saving debug in _get_month_usage")
+            return [], [], []
 
     # 增加获取每日用电量的函数
     def _get_daily_usage_data(self, driver):
@@ -577,26 +690,34 @@ class DataFetcher:
 
         time.sleep(self.RETRY_WAIT_TIME_OFFSET_UNIT)
 
-        # 等待用电量的数据出现
-        usage_element = driver.find_element(By.XPATH,
-                                            "//div[@class='el-tab-pane dayd']//div[@class='el-table__body-wrapper is-scrolling-none']/table/tbody/tr[1]/td[2]/div")
-        WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(usage_element))
+        try:
+            # 等待用电量的数据出现
+            usage_element = driver.find_element(By.XPATH,
+                                                "//div[@class='el-tab-pane dayd']//div[@class='el-table__body-wrapper is-scrolling-none']/table/tbody/tr[1]/td[2]/div")
+            WebDriverWait(driver, self.DRIVER_IMPLICITY_WAIT_TIME).until(EC.visibility_of(usage_element))
 
-        # 获取用电量的数据
-        days_element = driver.find_elements(By.XPATH,
-                                            "//*[@id='pane-second']/div[2]/div[2]/div[1]/div[3]/table/tbody/tr")  # 用电量值列表
-        date = []
-        usages = []
-        # 将用电量保存为字典
-        for i in days_element:
-            day = i.find_element(By.XPATH, "td[1]/div").text
-            usage = i.find_element(By.XPATH, "td[2]/div").text
-            if usage != "":
-                usages.append(usage)
-                date.append(day)
-            else:
-                logging.info(f"The electricity consumption of {usage} get nothing")
-        return date, usages
+            # 获取用电量的数据
+            days_element = driver.find_elements(By.XPATH,
+                                                "//*[@id='pane-second']/div[2]/div[2]/div[1]/div[3]/table/tbody/tr")  # 用电量值列表
+            date = []
+            usages = []
+            # 将用电量保存为字典
+            for i in days_element:
+                day = i.find_element(By.XPATH, "td[1]/div").text
+                usage = i.find_element(By.XPATH, "td[2]/div").text
+                if usage != "":
+                    usages.append(usage)
+                    date.append(day)
+                else:
+                    logging.info(f"The electricity consumption of {usage} get nothing")
+            return date, usages
+        except Exception as e:
+            logging.exception(f"The daily data get failed : {e}")
+            try:
+                self._save_debug(driver, 'daily_usage')
+            except Exception:
+                logging.exception("Failed saving debug in _get_daily_usage_data")
+            return [], []
 
     def _save_user_data(self, user_id, balance, last_daily_date, last_daily_usage, date, usages, month, month_usage, month_charge, yearly_charge, yearly_usage):
         # 连接数据库集合
