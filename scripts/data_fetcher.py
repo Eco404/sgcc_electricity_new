@@ -121,7 +121,7 @@ class DataFetcher:
 
     def _save_debug(self, driver, label: str):
         try:
-            debug_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'assets', 'debug'))
+            debug_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'debug'))
             os.makedirs(debug_dir, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             html_path = os.path.join(debug_dir, f"{label}_{ts}.html")
@@ -277,20 +277,39 @@ class DataFetcher:
             # sometimes ddddOCR may fail, so add retry logic)
             for retry_times in range(1, self.RETRY_TIMES_LIMIT + 1):
                 distance = -1
+                # 局部刷新失败计数器：连续刷新 captcha 未能获取有效 gap 时计数
+                refresh_failures = 0
                 while distance == -1: # 获取验证码距离失败时，刷新验证码重新获取
                     self._click_button(driver, By.XPATH, '//*[@id="login_box"]/div[1]/div[1]/div[2]/span')
                     #get canvas image
                     background_JS = 'return document.getElementById("slideVerify").childNodes[0].toDataURL("image/png");'
                     # targe_JS = 'return document.getElementsByClassName("slide-verify-block")[0].toDataURL("image/png");'
                     # get base64 image data
-                    im_info = driver.execute_script(background_JS) 
-                    background = im_info.split(',')[1]  
+                    im_info = driver.execute_script(background_JS)
+                    background = im_info.split(',')[1]
                     background_image = base64_to_PLI(background)
                     logging.info(f"Get electricity canvas image successfully.\r")
                     distance = self.onnx.get_distance(background_image)
                     if distance == -1:
+                        # 保存失败时的调试页面和截图，便于离线分析
+                        try:
+                            self._save_debug(driver, 'captcha_no_gap')
+                        except Exception:
+                            logging.exception("Failed saving debug in captcha_no_gap")
+                        refresh_failures += 1
                         logging.info(f"Get electricity canvas image distance failed, try to refresh the captcha and get again.\r")
-                        self._refresh_captcha(driver)
+                        # 如果连续刷新多次仍然无法得到正确图片，则刷新整个页面再重试
+                        if refresh_failures >= 3:
+                            logging.info("Captcha refresh attempted 3 times without result, give up local refresh and continue outer retries.")
+                            # 放弃局部刷新，跳出 inner while，让外层重试循环处理下一步（避免刷新页面导致需要重新登录）
+                            break
+                        else:
+                            self._refresh_captcha(driver)
+                # 如果在局部重试后仍未获取到 distance，则跳过本次尝试，进入下一次外层重试
+                if distance == -1:
+                    logging.info("Failed to obtain captcha distance after local refresh attempts; skipping this retry.")
+                    continue
+
                 logging.info(f"Image CaptCHA distance is {distance}.\r")
 
                 self._sliding_track(driver, round(distance*1.06)) #1.06是补偿
@@ -301,11 +320,12 @@ class DataFetcher:
                         errmsgs = driver.find_elements(By.CSS_SELECTOR, "div.errmsg-tip span")
                         if errmsgs:
                             errmsg = errmsgs[0].text
+                            logging.info(f"Login failed, errmsg: {errmsg}\r")
                             if "登录操作异常" in errmsg:
-                                logging.info(f"Login failed, account may be locked.\r")
+                                logging.info(f"Account may be locked.\r")
                                 return False
                             if "未知" in errmsg:
-                                logging.info(f"Login failed, too many attempts.\r")
+                                logging.info(f"Too many attempts.\r")
                                 return False
                     except:
                         pass
